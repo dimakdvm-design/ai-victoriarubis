@@ -79,5 +79,5 @@ echo "Теперь напиши своему боту в Telegram — он от�
 cd "$PLUGIN_DIR"
 exec env IS_SANDBOX=1 claude \
   --dangerously-skip-permissions \
-  --model claude-sonnet-4-6 \
+  --model claude-opus-5 \
   --dangerously-load-development-channels server:dashi-channel
