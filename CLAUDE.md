@@ -88,9 +88,9 @@ again». Никогда «No» — иначе Дима перестанет по
 ---
 
 ## Подключённые сервисы (MCP)
-Сейчас реально на связи: dashi-channel (Telegram) · WebFetch / WebSearch.
-github прописан в `.mcp.json`, но выключен в настройках — не считать его
-доступным инструментом, пока Дима явно не включит.
+Сейчас реально на связи: dashi-channel (Telegram) · github · WebFetch / WebSearch.
+github подключён и проверен 25.08.2026 (аккаунт dimakdvm-design), включён в
+`.claude/settings.local.json` — полноценный рабочий инструмент.
 gbrain-memory · gbrain-recall · gbrain-swarm — ещё не подключены, см. раздел
 «Общая память команды (gbrain)» ниже.
 
