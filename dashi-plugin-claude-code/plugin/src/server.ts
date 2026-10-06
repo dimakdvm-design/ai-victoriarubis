@@ -28,6 +28,7 @@ import {
   type StatePaths,
 } from './config.js'
 import { createLogger } from './log.js'
+import { createQueuedTelegramApi } from './telegram/send-queue.js'
 import { ensureStateDirs, migrateLegacyAllowlist } from './state/store.js'
 import {
   callTool,
@@ -219,7 +220,9 @@ if (!tokenLock.acquire(statePaths)) {
 // ─────────────────────────────────────────────────────────────────────
 
 const bot = new Bot(env.TELEGRAM_BOT_TOKEN)
-const telegramApi = createTelegramApi(bot, env.TELEGRAM_BOT_TOKEN)
+// Every outbound message goes through a per-chat queue: ~1.2s between sends
+// and automatic wait+retry on 429, so bursts never trigger a flood ban.
+const telegramApi = createQueuedTelegramApi(createTelegramApi(bot, env.TELEGRAM_BOT_TOKEN), { log })
 
 const mcp = new Server(
   { name: 'dashi-channel', version: '1.0.0' },
