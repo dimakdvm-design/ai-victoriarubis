@@ -26,6 +26,16 @@ export function isPhotoExtension(filePath: string): boolean {
   return PHOTO_EXTENSIONS.has(extname(filePath).toLowerCase())
 }
 
+// Extensions that send as a native video message (inline player, streams
+// before fully downloaded) instead of a generic document. 24.09.2026: Dima
+// reported document-attached .mp4s not loading on his end at all ("не
+// грузится") and asked explicitly for real video messages instead.
+export const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.m4v'])
+
+export function isVideoExtension(filePath: string): boolean {
+  return VIDEO_EXTENSIONS.has(extname(filePath).toLowerCase())
+}
+
 // resolveInsideWorkspace
 //
 // Canonicalises both `filePath` (resolved against `workspaceRoot` if

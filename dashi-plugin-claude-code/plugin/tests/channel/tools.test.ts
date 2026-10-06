@@ -35,6 +35,7 @@ function makeStubApi(overrides: Partial<TelegramApi> = {}): TelegramApi {
     },
     sendDocument: async (_chatId: string, _filePath: string, _opts: SendDocumentOpts) => ({ message_id: 2 }),
     sendPhoto: async (_chatId: string, _filePath: string, _opts: SendDocumentOpts) => ({ message_id: 3 }),
+    sendVideo: async (_chatId: string, _filePath: string, _opts: SendDocumentOpts) => ({ message_id: 4 }),
     downloadFile: async (_fileId: string, destDir: string): Promise<DownloadResult> => ({
       path: join(destDir, 'fake.bin'),
       size: 0,
@@ -229,6 +230,35 @@ describe('callTool', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0]?.text).toContain('TELEGRAM_WORKSPACE_ROOT')
     rmSync(deps.statePaths.root, { recursive: true, force: true })
+  })
+
+  test('reply with an .mp4 attachment sends it as a document, not a video', async () => {
+    // 24.09.2026: sendVideo() does not pass width/height/duration, so
+    // Telegram guesses them and can render the reel letterboxed (confirmed
+    // live). Routing video through sendDocument avoids that guess — see
+    // the comment above the attachment-sending loop in tools.ts.
+    const ws = mkdtempSync(join(tmpdir(), 'dashi-tools-ws-'))
+    writeFileSync(join(ws, 'clip.mp4'), 'fake video bytes')
+    const calls: string[] = []
+    const api = makeStubApi({
+      sendVideo: async (_chatId, _filePath, _opts) => {
+        calls.push('sendVideo')
+        return { message_id: 42 }
+      },
+      sendDocument: async (_chatId, _filePath, _opts) => {
+        calls.push('sendDocument')
+        return { message_id: 2 }
+      },
+    })
+    const deps = makeDeps({ config: makeConfig({ workspace_root: ws }), telegramApi: api })
+    const result = await callTool(
+      callReq('reply', { chat_id: '164795011', text: 'here', files: ['clip.mp4'] }),
+      deps,
+    )
+    expect(result.isError).toBeUndefined()
+    expect(calls).toEqual(['sendDocument'])
+    rmSync(deps.statePaths.root, { recursive: true, force: true })
+    rmSync(ws, { recursive: true, force: true })
   })
 
   test('reply without files succeeds via stub api', async () => {

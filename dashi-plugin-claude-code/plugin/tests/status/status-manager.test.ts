@@ -189,22 +189,39 @@ describe('StatusManager.start', () => {
 
   test('start finalises previous active status before opening a new one', async () => {
     // M3 fix: only one active status per chat. Calling start() twice in a
-    // row must edit the prior message to a terminal label ("Остановлено:
-    // superseded") before sending the new typing message, otherwise the
-    // album path leaks stale pulsing status messages.
+    // row must clear the prior message before sending the new typing
+    // message, otherwise the album path leaks stale pulsing status
+    // messages.
+    //
+    // 23.09.2026: "clear" means DELETE, not edit-to-a-visible-label — a
+    // real user (Dima) hit this constantly (send a follow-up before the
+    // bot finished the previous turn — completely routine in a live chat)
+    // and ended up with the discussion buried in permanent "Остановлено:
+    // superseded" lines that read as "the bot stopped answering". The
+    // class doc always promised "no edit to 'canceled' label" for this
+    // case; the delete path finally matches that.
     const { mgr, api } = makeManager()
     const firstHandle = await mgr.start('164795011', undefined)
     expect(api.calls.filter((c) => c.kind === 'send').length).toBe(1)
     await mgr.start('164795011', undefined)
+    // No visible "Остановлено" edit for the superseded message.
     const edits = api.calls.filter((c) => c.kind === 'edit')
-    expect(edits.length).toBeGreaterThanOrEqual(1)
-    // The cancel-edit targets the FIRST message id and ends with "superseded".
     const cancelEdit = edits.find((e) => e.messageId === firstHandle.messageId)
-    expect(cancelEdit).toBeDefined()
-    expect(cancelEdit!.text).toContain('Остановлено')
-    expect(cancelEdit!.text).toContain('superseded')
+    expect(cancelEdit).toBeUndefined()
+    // It was deleted instead.
+    const deletes = api.calls.filter((c) => c.kind === 'delete')
+    expect(deletes.some((d) => d.messageId === firstHandle.messageId)).toBe(true)
     // Two distinct send calls — one per start().
     expect(api.calls.filter((c) => c.kind === 'send').length).toBe(2)
+  })
+
+  test('start supersede-delete survives a delete failure without throwing', async () => {
+    const { mgr, api } = makeManager()
+    await mgr.start('164795011', undefined)
+    api.failDeleteWith = new Error('Bad Request: message to delete not found')
+    // Must not throw even though the delete of the superseded message fails.
+    await expect(mgr.start('164795011', undefined)).resolves.toBeDefined()
+    expect(mgr.isActive('164795011')).toBe(true)
   })
 
   test('start cancel-edit on the previous status survives a "message not modified" error', async () => {

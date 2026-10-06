@@ -468,6 +468,33 @@ export class StatusManager {
     if (!entry) return
     this.stopTimers(entry)
     this.entries.delete(chatId)
+
+    // 23.09.2026: 'superseded' fires on EVERY start() call that finds a
+    // still-active status (a person sending several messages before the
+    // previous turn finished replying — routine, not exceptional). The
+    // class doc above already promised "no edit to 'canceled' label" for
+    // this case, but the code edited one anyway, leaving a permanent
+    // "Остановлено: superseded" message behind for every overlapped turn.
+    // A busy chat accumulated dozens of these, burying the real replies
+    // and reading as "the bot stopped answering" — a real user (Dima)
+    // reported exactly this. Delete instead of edit here; every other
+    // reason ('ttl', 'user stop', 'shutdown', the MCP status tool's own
+    // stopped/error states) still finalises visibly, since those ARE
+    // meant to tell the user something happened.
+    if (reason === 'superseded' && this.telegramApi.deleteMessage) {
+      try {
+        await this.telegramApi.deleteMessage(chatId, entry.handle.messageId)
+        return
+      } catch (err) {
+        this.log.debug('status supersede delete failed (ignored)', {
+          chat_id: chatId,
+          message_id: entry.handle.messageId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return
+      }
+    }
+
     const text = renderState({ kind: 'stopped', reason }, 0, this.now())
     try {
       await this.telegramApi.editMessageText(

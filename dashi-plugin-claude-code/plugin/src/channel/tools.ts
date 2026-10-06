@@ -119,6 +119,7 @@ export interface TelegramApi {
   sendChatAction(chatId: string, action: ChatAction): Promise<void>
   sendDocument(chatId: string, filePath: string, opts: SendDocumentOpts): Promise<{ message_id: number }>
   sendPhoto(chatId: string, filePath: string, opts: SendDocumentOpts): Promise<{ message_id: number }>
+  sendVideo(chatId: string, filePath: string, opts: SendDocumentOpts): Promise<{ message_id: number }>
   downloadFile(fileId: string, destDir: string): Promise<DownloadResult>
   deleteMessage(chatId: string, messageId: number): Promise<void>
 }
@@ -170,6 +171,21 @@ export function createTelegramApi(bot: Bot, token: string): TelegramApi {
       }
       if (opts.caption !== undefined) other.caption = opts.caption
       const sent = await bot.api.sendPhoto(chatId, new InputFile(filePath), other)
+      return { message_id: sent.message_id }
+    },
+    async sendVideo(chatId, filePath, opts) {
+      const other: Record<string, unknown> = {}
+      if (opts.reply_to_message_id !== undefined) {
+        other.reply_parameters = { message_id: opts.reply_to_message_id }
+      }
+      if (opts.caption !== undefined) other.caption = opts.caption
+      // supports_streaming: plays while still downloading, same reason we
+      // want sendVideo over sendDocument at all — a document must finish
+      // downloading in full before it opens.
+      const sent = await bot.api.sendVideo(chatId, new InputFile(filePath), {
+        ...other,
+        supports_streaming: true,
+      })
       return { message_id: sent.message_id }
     },
     async deleteMessage(chatId, messageId) {
@@ -417,6 +433,16 @@ export async function callTool(req: CallToolRequest, deps: ToolDeps): Promise<Ca
         // Attachments. We send the canonical (realpath-resolved) path so a
         // symlink or relative path inside the workspace becomes the absolute
         // file ultimately handed to grammY's InputFile.
+        //
+        // 24.09.2026: sendVideo() (added in 60477d9, same day) does not pass
+        // width/height/duration, so Telegram guesses them itself — the exact
+        // failure mode already documented for the channel poster (see
+        // publish_queue.py's post_to_channel comment: "Telegram squashes the
+        // aspect ratio when it has to guess them"). Confirmed live: a 9:16
+        // reel sent through this path rendered letterboxed in Dima's chat.
+        // Routing video through sendDocument avoids the guess entirely —
+        // this also matches this tool's own advertised contract ("other
+        // types as documents"), which isVideoExtension silently violated.
         for (const canonical of canonicalFiles) {
           const opts: SendDocumentOpts = {}
           if (args.reply_to !== undefined) opts.reply_to_message_id = Number(args.reply_to)

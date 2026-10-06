@@ -20,7 +20,14 @@ export const AppConfigSchema = z.object({
   status: z.object({
     enabled: z.boolean().default(true),
     interval_ms: z.number().int().positive().default(700),
-    ttl_ms: z.number().int().positive().default(300_000),
+    // 23.09.2026: was 300_000 (5 min) — a real long tool call (e.g. a heavy
+    // 4K video render) routinely runs 10-20 min, well past that. The TTL
+    // guard fired mid-task, editing the status to "Остановлено: ttl" while
+    // work was still genuinely in progress — a live user (Dima) read that
+    // as the bot having stopped, though the real reply arrived later fine.
+    // Raised to comfortably cover observed durations; still eventually
+    // catches a truly stuck/crashed session, just not a slow-but-alive one.
+    ttl_ms: z.number().int().positive().default(1_800_000),
     delete_on_complete: z.boolean().default(true),
   }).default({}),
   album: z.object({
@@ -113,6 +120,7 @@ export const RuntimeEnvSchema = z.object({
   TELEGRAM_ALLOWED_USER_IDS: z.string().optional(), // CSV
   TELEGRAM_WORKSPACE_ROOT: z.string().optional(),
   TELEGRAM_STATUS_INTERVAL_MS: z.coerce.number().int().positive().optional(),
+  TELEGRAM_STATUS_TTL_MS: z.coerce.number().int().positive().optional(),
   TELEGRAM_ALBUM_FLUSH_MS: z.coerce.number().int().positive().optional(),
   GROQ_API_KEY: z.string().optional(),
   TELEGRAM_WEBHOOK_HOST: z.string().optional(),
@@ -252,6 +260,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   const status = (merged.status && typeof merged.status === 'object' ? merged.status : {}) as Record<string, unknown>
   if (parsedEnv.TELEGRAM_STATUS_INTERVAL_MS !== undefined) {
     status.interval_ms = parsedEnv.TELEGRAM_STATUS_INTERVAL_MS
+  }
+  if (parsedEnv.TELEGRAM_STATUS_TTL_MS !== undefined) {
+    status.ttl_ms = parsedEnv.TELEGRAM_STATUS_TTL_MS
   }
   if (Object.keys(status).length > 0) merged.status = status
 

@@ -368,6 +368,50 @@ export interface DownloadPhotoDeps {
   writeFile?: (path: string, data: Uint8Array) => Promise<void>
   mkdir?: (path: string) => Promise<void>
   now?: () => number
+  // Shrinks a downloaded photo before it lands in the inbox. Defaults to
+  // scaleImageWithFfmpeg. Injectable so tests don't need a real ffmpeg
+  // binary on PATH.
+  scaleImage?: (data: Uint8Array) => Promise<Uint8Array>
+}
+
+// Screenshots off a phone arrive at 1000-2500px wide — every extra pixel
+// costs tokens when Claude reads the file, and text stays readable well
+// below that. 760px matches the manual recipe already in use (see
+// core/strategy memory "ekonomiya-limita").
+const PHOTO_MAX_WIDTH = 760
+
+// Shells out to ffmpeg over stdin/stdout — no temp files. `min(760,iw)`
+// never upscales a photo that's already small; `-2` on height keeps the
+// dimension even, which some encoders require. Re-encodes to JPEG
+// regardless of source format: Telegram photo sizes are JPEG already, so
+// this is a resize in practice, not a format change.
+async function scaleImageWithFfmpeg(data: Uint8Array): Promise<Uint8Array> {
+  const { spawn } = await import('node:child_process')
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-v', 'error',
+      '-i', 'pipe:0',
+      '-vf', `scale='min(${PHOTO_MAX_WIDTH},iw)':-2`,
+      '-f', 'image2',
+      '-vcodec', 'mjpeg',
+      'pipe:1',
+    ])
+    const chunks: Uint8Array[] = []
+    proc.stdout.on('data', (chunk: Uint8Array) => chunks.push(chunk))
+    proc.on('error', reject)
+    proc.on('close', (code) => {
+      if (code !== 0 || chunks.length === 0) {
+        reject(new Error(`ffmpeg exited ${code} with no output`))
+        return
+      }
+      resolve(new Uint8Array(Buffer.concat(chunks)))
+    })
+    proc.stdin.on('error', () => {
+      // EPIPE etc. — the 'close' handler above reports the real failure.
+    })
+    proc.stdin.write(data)
+    proc.stdin.end()
+  })
 }
 
 export async function downloadPhotoToInbox(
@@ -398,6 +442,15 @@ export async function downloadPhotoToInbox(
     const ts = deps.now ? deps.now() : Date.now()
     const path = `${inboxDir}/${ts}-${uniqueId}.${ext}`
 
+    let toWrite: Uint8Array = buf
+    try {
+      toWrite = await (deps.scaleImage ?? scaleImageWithFfmpeg)(buf)
+    } catch {
+      // ffmpeg missing/failed — persist the original photo rather than
+      // dropping the attachment. Claude just reads more bytes this time.
+      toWrite = buf
+    }
+
     if (deps.mkdir) {
       await deps.mkdir(inboxDir)
     } else {
@@ -405,10 +458,10 @@ export async function downloadPhotoToInbox(
       await fs.mkdir(inboxDir, { recursive: true })
     }
     if (deps.writeFile) {
-      await deps.writeFile(path, buf)
+      await deps.writeFile(path, toWrite)
     } else {
       const fs = await import('node:fs/promises')
-      await fs.writeFile(path, buf)
+      await fs.writeFile(path, toWrite)
     }
     return path
   } catch {
