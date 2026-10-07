@@ -126,13 +126,23 @@ describe('createQueuedTelegramApi', () => {
   test('long flood ban (retry_after 600s) is waited out, not dropped', async () => {
     const clock = makeClock()
     const { api, calls } = makeApi(clock, { a: [tooMany(600)] })
-    const q = createQueuedTelegramApi(api, { now: clock.now, sleep: clock.sleep })
+    const q = createQueuedTelegramApi(api, { now: clock.now, sleep: clock.sleep, maxWaitMs: 1e9 })
 
     const out = await q.sendMessage('1', 'a', {})
 
     expect(out.message_id).toBe(100)
     expect(calls).toHaveLength(2)
     expect(calls[1]!.at).toBe(600_000)
+  })
+
+  test('a flood ban longer than maxWaitMs is rethrown at once, not slept through', async () => {
+    const clock = makeClock()
+    const { api, calls } = makeApi(clock, { a: [tooMany(600)] })
+    const q = createQueuedTelegramApi(api, { now: clock.now, sleep: clock.sleep })
+
+    await expect(q.sendMessage('1', 'a', {})).rejects.toMatchObject({ error_code: 429 })
+    expect(calls).toHaveLength(1)
+    expect(clock.sleeps).toEqual([])
   })
 
   test('gives up after maxAttempts 429s and rethrows', async () => {

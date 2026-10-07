@@ -16,12 +16,16 @@ import type { Logger } from '../log.js'
 
 export const DEFAULT_MIN_INTERVAL_MS = 1200
 export const DEFAULT_MAX_ATTEMPTS = 5
+// A tool call must not hang the agent for the length of a flood ban: waits longer
+// than this are not slept through, the 429 is rethrown so the caller can switch channel.
+export const DEFAULT_MAX_WAIT_MS = 120_000
 
 export interface SendQueueOptions {
   minIntervalMs?: number
   // Total attempts per call including the first one. 429s past this limit
   // are rethrown so a permanently blocked bot does not hang forever.
   maxAttempts?: number
+  maxWaitMs?: number
   log?: Logger
   // Injectable for tests.
   now?: () => number
@@ -58,6 +62,7 @@ export function retryAfterMs(err: unknown): number | undefined {
 export function createQueuedTelegramApi(inner: TelegramApi, opts: SendQueueOptions = {}): TelegramApi {
   const minIntervalMs = opts.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+  const maxWaitMs = opts.maxWaitMs ?? DEFAULT_MAX_WAIT_MS
   const now = opts.now ?? Date.now
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
   const log = opts.log
@@ -80,7 +85,7 @@ export function createQueuedTelegramApi(inner: TelegramApi, opts: SendQueueOptio
           return result
         } catch (err) {
           const retryMs = retryAfterMs(err)
-          if (retryMs === undefined || attempt >= maxAttempts) {
+          if (retryMs === undefined || attempt >= maxAttempts || retryMs > maxWaitMs) {
             l.nextAt = now() + minIntervalMs
             throw err
           }

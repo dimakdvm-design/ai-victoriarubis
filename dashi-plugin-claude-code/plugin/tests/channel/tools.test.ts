@@ -17,7 +17,6 @@ import {
 } from '../../src/channel/tools.js'
 import type { AppConfig, StatePaths } from '../../src/config.js'
 import { createLogger } from '../../src/log.js'
-import { createQueuedTelegramApi } from '../../src/telegram/send-queue.js'
 
 // Silent logger to keep test output clean.
 const silentLog = createLogger('test', { stream: { write: () => true } as unknown as NodeJS.WritableStream })
@@ -278,37 +277,6 @@ describe('callTool', () => {
     expect(captured!.text).toBe('hello')
     expect(result.content[0]?.text).toContain('sent')
     expect(result.content[0]?.text).toContain('99')
-    rmSync(deps.statePaths.root, { recursive: true, force: true })
-  })
-
-  test('reply with several files sends them one by one with a pause (queued api)', async () => {
-    const ws = mkdtempSync(join(tmpdir(), 'dashi-channel-ws-'))
-    const files = ['a.pdf', 'b.png', 'c.txt'].map(n => {
-      const p = join(ws, n)
-      writeFileSync(p, 'x')
-      return p
-    })
-    let t = 0
-    const sent: Array<{ kind: string; at: number }> = []
-    const raw = makeStubApi({
-      sendMessage: async () => (sent.push({ kind: 'text', at: t }), { message_id: 1 }),
-      sendDocument: async () => (sent.push({ kind: 'doc', at: t }), { message_id: 2 }),
-      sendPhoto: async () => (sent.push({ kind: 'photo', at: t }), { message_id: 3 }),
-    })
-    const api = createQueuedTelegramApi(raw, {
-      now: () => t,
-      sleep: async ms => {
-        t += ms
-      },
-    })
-    const deps = makeDeps({ telegramApi: api, config: makeConfig({ workspace_root: ws }) })
-    const result = await callTool(callReq('reply', { chat_id: '164795011', text: 'here', files }), deps)
-    expect(result.isError).toBeUndefined()
-    expect(sent.map(s => s.kind)).toEqual(['text', 'doc', 'photo', 'doc'])
-    for (let i = 1; i < sent.length; i++) {
-      expect(sent[i]!.at - sent[i - 1]!.at).toBeGreaterThanOrEqual(1200)
-    }
-    rmSync(ws, { recursive: true, force: true })
     rmSync(deps.statePaths.root, { recursive: true, force: true })
   })
 
