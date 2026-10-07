@@ -18,6 +18,21 @@
 import { escapeHtmlAttr } from '../format/html.js'
 import type { AppConfig } from '../config.js'
 
+// Handlers run one update at a time, so an unbounded network read or a
+// wedged ffmpeg would stall every later inbound message. Generous enough for
+// a 20MB file on a slow link, short enough to recover on a dead socket.
+export const DOWNLOAD_TIMEOUT_MS = 60_000
+const SCALE_TIMEOUT_MS = 30_000
+
+// Rejects when `p` has not settled within `ms`; always clears its timer.
+export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms)
+  })
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer))
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // MediaDescriptor — discriminated union over the eight media kinds the
 // inbound Telegram handlers recognize. Fields stay minimal: anything that
@@ -220,6 +235,9 @@ export interface VoiceTranscriptionInput {
   fetchImpl?: typeof fetch
   // Optional file-reader override so unit tests can avoid touching disk.
   readFile?: (path: string) => Promise<Uint8Array>
+  // Upper bound for the download and for the Groq request, each. Default
+  // DOWNLOAD_TIMEOUT_MS.
+  timeoutMs?: number
 }
 
 export interface VoiceTranscriptionResult {
@@ -266,7 +284,8 @@ export async function maybeTranscribeVoice(
   const fetchFn = input.fetchImpl ?? fetch
 
   try {
-    const downloaded = await input.downloadFile(input.fileId)
+    const timeoutMs = input.timeoutMs ?? DOWNLOAD_TIMEOUT_MS
+    const downloaded = await withTimeout(input.downloadFile(input.fileId), timeoutMs, 'voice download')
 
     // Re-check actual size after download — Telegram metadata can lag.
     if (downloaded.size !== undefined && downloaded.size > GROQ_MAX_BYTES) {
@@ -304,6 +323,7 @@ export async function maybeTranscribeVoice(
       method: 'POST',
       headers: { Authorization: `Bearer ${key}` },
       body: form,
+      signal: AbortSignal.timeout(timeoutMs),
     })
 
     if (!res.ok) {
@@ -372,7 +392,12 @@ export interface DownloadPhotoDeps {
   // scaleImageWithFfmpeg. Injectable so tests don't need a real ffmpeg
   // binary on PATH.
   scaleImage?: (data: Uint8Array) => Promise<Uint8Array>
+  // Upper bound for getFile CDN fetch + body read. Default DOWNLOAD_TIMEOUT_MS.
+  timeoutMs?: number
+  // Upper bound for scaleImage. On expiry the raw bytes are written instead.
+  scaleTimeoutMs?: number
 }
+
 
 // Screenshots off a phone arrive at 1000-2500px wide — every extra pixel
 // costs tokens when Claude reads the file, and text stays readable well
@@ -396,6 +421,10 @@ async function scaleImageWithFfmpeg(data: Uint8Array): Promise<Uint8Array> {
       '-vcodec', 'mjpeg',
       'pipe:1',
     ])
+    // Kill a wedged ffmpeg so it does not outlive the timeout in
+    // downloadPhotoToInbox as an orphan process.
+    const killer = setTimeout(() => proc.kill('SIGKILL'), SCALE_TIMEOUT_MS)
+    proc.on('close', () => clearTimeout(killer))
     const chunks: Uint8Array[] = []
     proc.stdout.on('data', (chunk: Uint8Array) => chunks.push(chunk))
     proc.on('error', reject)
@@ -432,7 +461,8 @@ export async function downloadPhotoToInbox(
     if (file.file_size !== undefined && file.file_size > maxBytes) return undefined
 
     const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
-    const res = await fetchFn(url)
+    // The signal covers both the headers and the body read below.
+    const res = await fetchFn(url, { signal: AbortSignal.timeout(deps.timeoutMs ?? DOWNLOAD_TIMEOUT_MS) })
     if (!res.ok) return undefined
     const buf = new Uint8Array(await res.arrayBuffer())
 
@@ -444,7 +474,11 @@ export async function downloadPhotoToInbox(
 
     let toWrite: Uint8Array = buf
     try {
-      toWrite = await (deps.scaleImage ?? scaleImageWithFfmpeg)(buf)
+      toWrite = await withTimeout(
+        (deps.scaleImage ?? scaleImageWithFfmpeg)(buf),
+        deps.scaleTimeoutMs ?? SCALE_TIMEOUT_MS,
+        'photo scaling',
+      )
     } catch {
       // ffmpeg missing/failed — persist the original photo rather than
       // dropping the attachment. Claude just reads more bytes this time.

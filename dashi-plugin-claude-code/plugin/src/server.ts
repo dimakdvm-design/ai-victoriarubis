@@ -59,7 +59,6 @@ import {
   handleInboundVideo,
   handleInboundVideoNote,
   handleInboundVoice,
-  sendAlbumNotification,
   type AlbumEntry,
   type HandlerDeps,
 } from './telegram/handlers.js'
@@ -421,35 +420,12 @@ function shutdown(): void {
     void statusManager.cancel(chatId, 'shutdown')
   }
 
-  // Drain any pending album buffers — fire one final notification per
-  // album so messages already received aren't dropped. We don't await
-  // (shutdown is bounded by the 2s setTimeout below); each call is
-  // best-effort and logs internally.
+  // Drain any pending album buffers — each album goes out through the
+  // callback captured when it was buffered, so it keeps its real chat_id
+  // and sender. Not awaited: shutdown is bounded by the 2s timer below.
   try {
-    const pending = albumBuffer.flushAll()
-    for (const album of pending) {
-      const first = album.messages[0]
-      const reply = album.messages.find((m) => m.reply !== undefined)?.reply
-      void sendAlbumNotification(
-        album,
-        {
-          // We didn't capture per-album chatId/senderId in this drain path;
-          // shutdown drain emits with empty ids so the agent at least sees
-          // the album content rather than losing it silently.
-          chatId: '',
-          senderId: '',
-          mediaGroupId: album.mediaGroupId,
-          kind: 'album_shutdown',
-        },
-        { server: mcp, config, log, bot: botIdentity, telegramApi, statusManager },
-      )
-      log.info('album drained on shutdown', {
-        media_group_id: album.mediaGroupId,
-        album_size: album.messages.length,
-        first_message_id: first?.messageId,
-        had_reply: reply !== undefined,
-      })
-    }
+    const drained = albumBuffer.drain()
+    if (drained > 0) log.info('albums drained on shutdown', { count: drained })
   } catch (err) {
     log.warn('album drain failed', { error: err instanceof Error ? err.message : String(err) })
   }

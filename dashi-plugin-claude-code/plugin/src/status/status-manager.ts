@@ -160,6 +160,9 @@ export class StatusManager {
   private readonly setTimer: (cb: () => void, ms: number) => NodeJS.Timeout
   private readonly clearTimer: (handle: NodeJS.Timeout) => void
   private readonly entries: Map<string, InternalEntry>
+  // In-flight start() per chat. Starts are serialised per chat so two
+  // concurrent callers cannot both send a bubble and orphan the first one.
+  private readonly starting = new Map<string, Promise<unknown>>()
 
   constructor(deps: StatusManagerDeps) {
     this.telegramApi = deps.telegramApi
@@ -186,6 +189,27 @@ export class StatusManager {
     chatId: string,
     replyToMessageId: number | undefined,
     initialState: StatusState = { kind: 'typing' },
+  ): Promise<StatusHandle> {
+    // sendMessage below waits in the per-chat send queue, so without this
+    // chaining a second start() would miss the first one's entry and leave
+    // its message in the chat forever.
+    const prev = this.starting.get(chatId)
+    const run = (async () => {
+      if (prev) await prev.catch(() => undefined)
+      return this.startNow(chatId, replyToMessageId, initialState)
+    })()
+    this.starting.set(chatId, run)
+    try {
+      return await run
+    } finally {
+      if (this.starting.get(chatId) === run) this.starting.delete(chatId)
+    }
+  }
+
+  private async startNow(
+    chatId: string,
+    replyToMessageId: number | undefined,
+    initialState: StatusState,
   ): Promise<StatusHandle> {
     // Only one active status per chat at a time: finalise the previous one
     // (edit the old message to "Остановлено: superseded" and clear timers)
@@ -317,7 +341,10 @@ export class StatusManager {
     // Lazy-open: hook events can arrive before any inbound Telegram message.
     // In that case we open a status with no reply target so the rendering
     // surface exists. Initial state is `activity` so the first edit shows
-    // the working block, not "Печатает…".
+    // the working block, not "Печатает…". A concurrent event may already be
+    // opening one — wait for it instead of opening a second bubble.
+    const opening = this.starting.get(chatId)
+    if (opening) await opening.catch(() => undefined)
     let entry = this.entries.get(chatId)
     if (!entry) {
       const initial: StatusState = {

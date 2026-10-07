@@ -48,6 +48,7 @@ import {
   type PermissionRelayHooks,
 } from '../channel/permissions.js'
 import { AlbumBuffer, type Album } from './album-buffer.js'
+import { writeDeadLetter } from '../state/store.js'
 
 // A single buffered album item — one Telegram update that belongs to an
 // album. We capture everything needed to emit a combined channel notification
@@ -71,6 +72,8 @@ export interface AlbumDispatchDeps {
   bot: BotIdentity
   telegramApi: TelegramApi
   statusManager?: StatusManager
+  // Where an album that failed to reach the channel is dead-lettered.
+  statePaths?: StatePaths
 }
 
 export interface HandlerDeps {
@@ -284,11 +287,11 @@ async function tryRouteToAlbumBuffer(
     reply,
   }
 
-  // Open the status transient on first inbound — gateway.py does this
-  // on EVERY message but for albums one "Печатает..." per album is more
-  // honest about what's happening. We attempt on every push; status
-  // manager dedups via isActive check internally (best-effort).
-  if (deps.statusManager && deps.config.status.enabled) {
+  // Open the status transient on the first item only — one "Печатает..."
+  // per album. A start() per item would supersede (send + delete) the
+  // bubble each time; through the send queue that stalls the poller long
+  // enough for the album to flush early and split in two.
+  if (deps.statusManager && deps.config.status.enabled && !deps.albumBuffer.has(mgid)) {
     try {
       await deps.statusManager.start(decision.chatId, ctx.message?.message_id)
     } catch (err) {
@@ -306,16 +309,22 @@ async function tryRouteToAlbumBuffer(
     bot: deps.bot,
     telegramApi: deps.telegramApi,
     ...(deps.statusManager !== undefined ? { statusManager: deps.statusManager } : {}),
+    statePaths: deps.statePaths,
   }
   const chatIdAtPush = decision.chatId
   const senderIdAtPush = decision.senderId
 
   deps.albumBuffer.push(mgid, entry, (album) => {
-    void sendAlbumNotification(
+    sendAlbumNotification(
       album,
       { chatId: chatIdAtPush, senderId: senderIdAtPush, mediaGroupId: mgid, kind },
       dispatchDeps,
-    )
+    ).catch((err) => {
+      deps.log.error('album dispatch threw', {
+        media_group_id: mgid,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
   })
   deps.log.debug('album buffered', {
     kind,
@@ -380,10 +389,25 @@ export async function sendAlbumNotification(
   })
   const delivered = await sendChannelNotification(deps.server, event, deps.log)
   if (!delivered) {
-    deps.log.warn('album notify failed — content lost (no dead-letter for album path)', {
+    // The items' update offsets were advanced when they were buffered, so
+    // this is the only remaining copy — keep it like the single-message
+    // path does (poller dead-letters on handler throw).
+    deps.log.error('album notify failed — dead-lettering', {
       media_group_id: ids.mediaGroupId,
       chat_id: ids.chatId,
     })
+    if (deps.statePaths) {
+      try {
+        writeDeadLetter(deps.statePaths, 'updates', {
+          album: { ...ids, content, meta },
+          error: 'channel notify failed — album dead-lettered',
+        })
+      } catch (err) {
+        deps.log.error('dead-letter write failed', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
   }
 }
 

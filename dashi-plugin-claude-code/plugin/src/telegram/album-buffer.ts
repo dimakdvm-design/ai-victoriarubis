@@ -106,6 +106,11 @@ export class AlbumBuffer<TMessage> {
     entry.timer = this.armTimer(mediaGroupId)
   }
 
+  /** True while an album for `mediaGroupId` is still collecting items. */
+  has(mediaGroupId: string): boolean {
+    return this.entries.has(mediaGroupId)
+  }
+
   /**
    * Force-flush a specific album. Cancels any pending timer, removes the
    * entry from the buffer, and returns the assembled Album. Does NOT call
@@ -142,6 +147,28 @@ export class AlbumBuffer<TMessage> {
       if (album) out.push(album)
     }
     return out
+  }
+
+  /**
+   * Flush every buffered album now and dispatch each through the onFlush
+   * captured at its first push — the same path a timer flush takes, so the
+   * album keeps its real destination. Used on shutdown. Returns the number
+   * of albums dispatched.
+   */
+  drain(): number {
+    let n = 0
+    for (const mgid of Array.from(this.entries.keys())) {
+      const onFlush = this.entries.get(mgid)?.onFlush
+      const album = this.flush(mgid)
+      if (!album || !onFlush) continue
+      n++
+      try {
+        onFlush(album)
+      } catch {
+        // Same policy as the timer path: one bad album must not stop the rest.
+      }
+    }
+    return n
   }
 
   // Internal: build and start a flush timer for `mediaGroupId`. When the

@@ -209,6 +209,26 @@ describe('AlbumBuffer', () => {
     expect(callbacks[0]?.messages.map((m) => m.id)).toEqual([99])
   })
 
+  test('drain delivers every pending album through its own onFlush (shutdown path)', () => {
+    // Shutdown used flushAll() and re-sent albums with an empty chat_id, so
+    // the agent got the photos but had nowhere to reply. drain() must reuse
+    // the callback captured at push time — it carries the real chat id.
+    const { buffer, clock } = makeBuffer(2000)
+    const got: Array<{ dest: string; ids: number[] }> = []
+    buffer.push('mg-x', { id: 1, caption: '' }, (a) => got.push({ dest: 'chat-x', ids: a.messages.map((m) => m.id) }))
+    buffer.push('mg-x', { id: 2, caption: '' }, () => got.push({ dest: 'wrong', ids: [] }))
+    buffer.push('mg-y', { id: 10, caption: '' }, (a) => got.push({ dest: 'chat-y', ids: a.messages.map((m) => m.id) }))
+
+    expect(buffer.drain()).toBe(2)
+    expect(got).toEqual([
+      { dest: 'chat-x', ids: [1, 2] },
+      { dest: 'chat-y', ids: [10] },
+    ])
+    expect(clock.pending()).toBe(0)
+    clock.tick(10_000)
+    expect(got).toHaveLength(2)
+  })
+
   test('push resets silence timer when new message arrives within window', () => {
     const { buffer, clock, flushed } = makeBuffer(2000)
     buffer.push('mg-reset', { id: 1, caption: '' }, (a) => flushed.push(a))

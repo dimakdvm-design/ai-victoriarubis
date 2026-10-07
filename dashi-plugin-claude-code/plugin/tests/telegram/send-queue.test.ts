@@ -37,6 +37,7 @@ function makeApi(clock: { now: () => number }, failures: Record<string, unknown[
     sendMessage: async (chatId: string, text: string, _o: SendMessageOpts) => record('sendMessage', chatId, text),
     sendDocument: async (chatId: string, p: string, _o: SendDocumentOpts) => record('sendDocument', chatId, p),
     sendPhoto: async (chatId: string, p: string, _o: SendDocumentOpts) => record('sendPhoto', chatId, p),
+    sendVideo: async (chatId: string, p: string, _o: SendDocumentOpts) => record('sendVideo', chatId, p),
     editMessageText: async () => {},
     setMessageReaction: async () => {},
     sendChatAction: async () => {},
@@ -185,5 +186,23 @@ describe('createQueuedTelegramApi', () => {
 
     expect(edits).toBe(2)
     expect(clock.sleeps).toEqual([])
+  })
+
+  test('sendVideo also creates a message: queued and retried on 429, not dropped', async () => {
+    const clock = makeClock()
+    const { api, calls } = makeApi(clock, { '/v.mp4': [tooMany(3)] })
+    const q = createQueuedTelegramApi(api, { now: clock.now, sleep: clock.sleep })
+
+    const [text, video] = await Promise.all([
+      q.sendMessage('1', 'before', {}),
+      q.sendVideo('1', '/v.mp4', {}),
+    ])
+    expect(text.message_id).toBeGreaterThan(0)
+    expect(video.message_id).toBeGreaterThan(0)
+    const videoCalls = calls.filter((c) => c.method === 'sendVideo')
+    expect(videoCalls.length).toBe(2)
+    // Waited the gap after the text message, then retry_after after the 429.
+    expect(videoCalls[0]!.at).toBeGreaterThanOrEqual(1200)
+    expect(videoCalls[1]!.at - videoCalls[0]!.at).toBeGreaterThanOrEqual(3000)
   })
 })

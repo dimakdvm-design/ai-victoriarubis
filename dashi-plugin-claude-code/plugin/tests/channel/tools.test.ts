@@ -5,6 +5,7 @@ import { join } from 'path'
 
 import {
   callTool,
+  createTelegramApi,
   listTools,
   type CallToolRequest,
   type DownloadResult,
@@ -516,6 +517,55 @@ describe('callTool', () => {
     expect(result.isError).toBeUndefined()
     expect(captured).not.toBeNull()
     expect(captured!.fileId).toBe('AgAD...')
+    rmSync(deps.statePaths.root, { recursive: true, force: true })
+  })
+})
+
+// download_attachment must not leave the agent's tool call hanging forever
+// when the Telegram file CDN stops responding mid-download.
+describe('createTelegramApi.downloadFile — never hangs', () => {
+  test('rejects once downloadTimeoutMs passes on a stalled fetch', async () => {
+    const fakeBot = {
+      api: { getFile: async () => ({ file_id: 'f', file_unique_id: 'u', file_path: 'documents/a.pdf' }) },
+    } as unknown as Parameters<typeof createTelegramApi>[0]
+    const realFetch = globalThis.fetch
+    globalThis.fetch = ((_url: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })) as unknown as typeof fetch
+    try {
+      const api = createTelegramApi(fakeBot, 'TOKEN', { downloadTimeoutMs: 50 })
+      await expect(api.downloadFile('f', tmpdir())).rejects.toThrow()
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+})
+
+// A long reply goes out in several messages. If a later chunk fails, the
+// earlier ones are already in the chat — the error must say so, otherwise the
+// agent retries the whole reply and the user gets the first part twice.
+describe('reply — partial failure', () => {
+  test('error names the parts already delivered so the agent does not resend them', async () => {
+    let n = 0
+    const api = makeStubApi({
+      sendMessage: async () => {
+        n++
+        if (n === 2) throw new Error('Bad Request: chat not found')
+        return { message_id: 900 + n }
+      },
+    })
+    const deps = makeDeps({ telegramApi: api })
+    const para = 'z'.repeat(2900)
+    const result = await callTool(
+      callReq('reply', { chat_id: '164795011', text: [para, para, para].join('\n\n') }),
+      deps,
+    )
+    expect(result.isError).toBe(true)
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('chat not found')
+    expect(text).toContain('901')
+    expect(text).toMatch(/already (sent|delivered)/)
     rmSync(deps.statePaths.root, { recursive: true, force: true })
   })
 })
