@@ -3,7 +3,7 @@
 // Telegram allows roughly one message per second per chat; bursts get
 // answered with 429 Too Many Requests and, if repeated, a flood ban of
 // several minutes. This wrapper serialises every message-creating call
-// (sendMessage / sendDocument / sendPhoto) per chat, keeps a minimum gap
+// (sendMessage / sendDocument / sendPhoto / sendVideo) per chat, keeps a minimum gap
 // between them, and on 429 waits `retry_after` seconds and retries the same
 // call so the message is never dropped.
 //
@@ -108,5 +108,6 @@ export function createQueuedTelegramApi(inner: TelegramApi, opts: SendQueueOptio
     sendDocument: (chatId, filePath, o) =>
       enqueue(chatId, 'sendDocument', () => inner.sendDocument(chatId, filePath, o)),
     sendPhoto: (chatId, filePath, o) => enqueue(chatId, 'sendPhoto', () => inner.sendPhoto(chatId, filePath, o)),
+    sendVideo: (chatId, filePath, o) => enqueue(chatId, 'sendVideo', () => inner.sendVideo(chatId, filePath, o)),
   }
 }
