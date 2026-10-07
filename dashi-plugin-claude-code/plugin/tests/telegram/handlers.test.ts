@@ -8,12 +8,18 @@
 //     normal channel forward instead of invoking handleOobCommand.
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { Context } from 'grammy'
 
-import { handleInboundText, type HandlerDeps } from '../../src/telegram/handlers.js'
+import {
+  handleInboundDocument,
+  handleInboundText,
+  type AlbumEntry,
+  type HandlerDeps,
+} from '../../src/telegram/handlers.js'
+import { AlbumBuffer } from '../../src/telegram/album-buffer.js'
 import type { AppConfig, StatePaths } from '../../src/config.js'
 import { createLogger } from '../../src/log.js'
 import type {
@@ -319,6 +325,96 @@ describe('handleInboundText — OOB allowed_chat_ids gate (Fix 6)', () => {
 
     // OOB handled inline — no channel notify for /help.
     expect(serverSpy.calls.length).toBe(0)
+    rmSync(statePaths.root, { recursive: true, force: true })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// Album path robustness.
+// ─────────────────────────────────────────────────────────────────────
+
+function makeAlbumCtx(messageId: number, mgid: string, caption = ''): Context {
+  const chat = { id: 164795011, type: 'private' as const }
+  const from = { id: 164795011, is_bot: false, first_name: 'x' }
+  return {
+    chat,
+    from,
+    message: {
+      message_id: messageId,
+      date: 1700000000,
+      chat,
+      from,
+      media_group_id: mgid,
+      caption,
+      document: { file_id: `f${messageId}`, file_unique_id: `u${messageId}`, file_name: 'a.pdf' },
+    },
+  } as unknown as Context
+}
+
+// Timers fire only when the test calls fire() — keeps album flush deterministic.
+function makeManualAlbumBuffer(): { buffer: AlbumBuffer<AlbumEntry>; fire: () => void } {
+  const pending: Array<() => void> = []
+  const buffer = new AlbumBuffer<AlbumEntry>({
+    flushMs: 2000,
+    setTimer: (cb) => {
+      pending.push(cb)
+      return pending.length as unknown as NodeJS.Timeout
+    },
+    clearTimer: (h) => {
+      pending[(h as unknown as number) - 1] = () => {}
+    },
+  })
+  return {
+    buffer,
+    fire: () => {
+      for (const cb of pending.splice(0)) cb()
+    },
+  }
+}
+
+describe('album handling', () => {
+  test('opens the "Печатает..." status once per album, not once per item', async () => {
+    const { deps } = makeDeps({ config: makeConfig({ status: { enabled: true, interval_ms: 700, ttl_ms: 300_000, delete_on_complete: true } }) })
+    const starts: string[] = []
+    deps.statusManager = {
+      start: async (chatId: string) => {
+        starts.push(chatId)
+        return { chatId, messageId: 1, startedAt: 0 }
+      },
+    } as unknown as NonNullable<HandlerDeps['statusManager']>
+    const { buffer } = makeManualAlbumBuffer()
+    deps.albumBuffer = buffer
+
+    for (const id of [1, 2, 3]) {
+      await handleInboundDocument(makeAlbumCtx(id, 'mg1'), deps)
+    }
+    // Each extra start() supersedes the previous bubble: one send + one
+    // delete per photo through the 1.2 s send queue, which also stalls the
+    // poller long enough to split the album in two.
+    expect(starts.length).toBe(1)
+  })
+
+  test('album whose channel notify fails is dead-lettered, not silently lost', async () => {
+    const failingServer = {
+      notification: async (): Promise<void> => {
+        throw new Error('transport closed')
+      },
+    }
+    const { deps, statePaths } = makeDeps({ server: failingServer })
+    mkdirSync(statePaths.deadLetterUpdates, { recursive: true })
+    const { buffer, fire } = makeManualAlbumBuffer()
+    deps.albumBuffer = buffer
+
+    await handleInboundDocument(makeAlbumCtx(1, 'mg2', 'look'), deps)
+    await handleInboundDocument(makeAlbumCtx(2, 'mg2'), deps)
+    fire()
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 1))
+
+    const files = readdirSync(statePaths.deadLetterUpdates)
+    expect(files.length).toBe(1)
+    const saved = readFileSync(join(statePaths.deadLetterUpdates, files[0]!), 'utf8')
+    expect(saved).toContain('mg2')
+    expect(saved).toContain('look')
     rmSync(statePaths.root, { recursive: true, force: true })
   })
 })

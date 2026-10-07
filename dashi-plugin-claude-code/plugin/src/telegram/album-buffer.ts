@@ -106,6 +106,11 @@ export class AlbumBuffer<TMessage> {
     entry.timer = this.armTimer(mediaGroupId)
   }
 
+  /** True while an album for `mediaGroupId` is still collecting items. */
+  has(mediaGroupId: string): boolean {
+    return this.entries.has(mediaGroupId)
+  }
+
   /**
    * Force-flush a specific album. Cancels any pending timer, removes the
    * entry from the buffer, and returns the assembled Album. Does NOT call
