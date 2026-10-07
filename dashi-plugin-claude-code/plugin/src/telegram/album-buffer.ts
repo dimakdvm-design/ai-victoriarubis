@@ -149,6 +149,28 @@ export class AlbumBuffer<TMessage> {
     return out
   }
 
+  /**
+   * Flush every buffered album now and dispatch each through the onFlush
+   * captured at its first push — the same path a timer flush takes, so the
+   * album keeps its real destination. Used on shutdown. Returns the number
+   * of albums dispatched.
+   */
+  drain(): number {
+    let n = 0
+    for (const mgid of Array.from(this.entries.keys())) {
+      const onFlush = this.entries.get(mgid)?.onFlush
+      const album = this.flush(mgid)
+      if (!album || !onFlush) continue
+      n++
+      try {
+        onFlush(album)
+      } catch {
+        // Same policy as the timer path: one bad album must not stop the rest.
+      }
+    }
+    return n
+  }
+
   // Internal: build and start a flush timer for `mediaGroupId`. When the
   // timer fires the entry (if still present) is removed and its onFlush
   // is invoked with the assembled Album. If push() re-armed the timer in
