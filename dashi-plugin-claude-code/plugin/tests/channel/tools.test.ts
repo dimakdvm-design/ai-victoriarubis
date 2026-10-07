@@ -5,6 +5,7 @@ import { join } from 'path'
 
 import {
   callTool,
+  createTelegramApi,
   listTools,
   type CallToolRequest,
   type DownloadResult,
@@ -517,5 +518,26 @@ describe('callTool', () => {
     expect(captured).not.toBeNull()
     expect(captured!.fileId).toBe('AgAD...')
     rmSync(deps.statePaths.root, { recursive: true, force: true })
+  })
+})
+
+// download_attachment must not leave the agent's tool call hanging forever
+// when the Telegram file CDN stops responding mid-download.
+describe('createTelegramApi.downloadFile — never hangs', () => {
+  test('rejects once downloadTimeoutMs passes on a stalled fetch', async () => {
+    const fakeBot = {
+      api: { getFile: async () => ({ file_id: 'f', file_unique_id: 'u', file_path: 'documents/a.pdf' }) },
+    } as unknown as Parameters<typeof createTelegramApi>[0]
+    const realFetch = globalThis.fetch
+    globalThis.fetch = ((_url: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })) as unknown as typeof fetch
+    try {
+      const api = createTelegramApi(fakeBot, 'TOKEN', { downloadTimeoutMs: 50 })
+      await expect(api.downloadFile('f', tmpdir())).rejects.toThrow()
+    } finally {
+      globalThis.fetch = realFetch
+    }
   })
 })

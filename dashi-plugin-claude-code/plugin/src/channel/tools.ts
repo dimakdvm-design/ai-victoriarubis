@@ -27,6 +27,7 @@ import {
   StatusArgsSchema,
 } from '../schemas.js'
 import { assertAllowedChat } from '../telegram/gate.js'
+import { DOWNLOAD_TIMEOUT_MS } from '../telegram/media.js'
 import {
   isTelegramHtmlParseError,
   markdownToTelegramHtml,
@@ -126,7 +127,12 @@ export interface TelegramApi {
 
 // Thin wrapper around grammY bot.api. Keeps the rest of the system free of
 // grammy-specific quirks (reply_parameters vs reply_to_message_id, etc).
-export function createTelegramApi(bot: Bot, token: string): TelegramApi {
+export function createTelegramApi(
+  bot: Bot,
+  token: string,
+  opts: { downloadTimeoutMs?: number } = {},
+): TelegramApi {
+  const downloadTimeoutMs = opts.downloadTimeoutMs ?? DOWNLOAD_TIMEOUT_MS
   return {
     async sendMessage(chatId, text, opts) {
       const other: Record<string, unknown> = {}
@@ -195,7 +201,8 @@ export function createTelegramApi(bot: Bot, token: string): TelegramApi {
       const file = await bot.api.getFile(fileId)
       if (!file.file_path) throw new Error('Telegram returned no file_path — file may have expired')
       const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
-      const res = await fetch(url)
+      // Bounded so a dead CDN socket fails the tool call instead of hanging it.
+      const res = await fetch(url, { signal: AbortSignal.timeout(downloadTimeoutMs) })
       if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
       const buf = Buffer.from(await res.arrayBuffer())
       const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop() ?? 'bin' : 'bin'
