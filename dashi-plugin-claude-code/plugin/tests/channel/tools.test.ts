@@ -541,3 +541,31 @@ describe('createTelegramApi.downloadFile — never hangs', () => {
     }
   })
 })
+
+// A long reply goes out in several messages. If a later chunk fails, the
+// earlier ones are already in the chat — the error must say so, otherwise the
+// agent retries the whole reply and the user gets the first part twice.
+describe('reply — partial failure', () => {
+  test('error names the parts already delivered so the agent does not resend them', async () => {
+    let n = 0
+    const api = makeStubApi({
+      sendMessage: async () => {
+        n++
+        if (n === 2) throw new Error('Bad Request: chat not found')
+        return { message_id: 900 + n }
+      },
+    })
+    const deps = makeDeps({ telegramApi: api })
+    const para = 'z'.repeat(2900)
+    const result = await callTool(
+      callReq('reply', { chat_id: '164795011', text: [para, para, para].join('\n\n') }),
+      deps,
+    )
+    expect(result.isError).toBe(true)
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('chat not found')
+    expect(text).toContain('901')
+    expect(text).toMatch(/already (sent|delivered)/)
+    rmSync(deps.statePaths.root, { recursive: true, force: true })
+  })
+})

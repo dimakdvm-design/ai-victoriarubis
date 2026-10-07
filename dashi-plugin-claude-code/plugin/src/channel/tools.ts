@@ -387,76 +387,88 @@ export async function callTool(req: CallToolRequest, deps: ToolDeps): Promise<Ca
 
         const sentIds: number[] = []
 
-        if (args.format === 'html') {
-          // Convert markdown → Telegram HTML, then chunk at 4000 chars so we
-          // never exceed Telegram's 4096 sendMessage cap. reply_to applies
-          // only to the first chunk so a long answer doesn't quote-spam the
-          // user's original message N times.
-          const rendered = markdownToTelegramHtml(args.text)
-          const chunks = splitMessage(rendered)
-          for (let i = 0; i < chunks.length; i++) {
-            const chunkOpts: SendMessageOpts = { parse_mode: 'HTML' }
-            if (i === 0 && replyToId !== undefined) chunkOpts.reply_to_message_id = replyToId
-            const chunk = chunks[i] as string
-            try {
-              const out = await telegramApi.sendMessage(args.chat_id, chunk, chunkOpts)
-              sentIds.push(out.message_id)
-            } catch (err) {
-              if (isTelegramHtmlParseError(err)) {
-                // Telegram rejected our HTML. Retry the SAME chunk as plain
-                // text so the user still sees the answer body — better a
-                // missing <b> than a missing reply. Mirror gateway.py:500-510.
-                log.warn('telegram HTML parse failed, retrying as plain text', {
-                  chunk_index: i,
-                  error: err instanceof Error ? err.message : String(err),
-                })
-                const plainOpts: SendMessageOpts = {}
-                if (i === 0 && replyToId !== undefined) plainOpts.reply_to_message_id = replyToId
-                const out = await telegramApi.sendMessage(args.chat_id, chunk, plainOpts)
+        // Once one part is out, a later failure must not read as "nothing
+        // sent": the agent would retry the whole reply and duplicate it.
+        try {
+          if (args.format === 'html') {
+            // Convert markdown → Telegram HTML, then chunk at 4000 chars so we
+            // never exceed Telegram's 4096 sendMessage cap. reply_to applies
+            // only to the first chunk so a long answer doesn't quote-spam the
+            // user's original message N times.
+            const rendered = markdownToTelegramHtml(args.text)
+            const chunks = splitMessage(rendered)
+            for (let i = 0; i < chunks.length; i++) {
+              const chunkOpts: SendMessageOpts = { parse_mode: 'HTML' }
+              if (i === 0 && replyToId !== undefined) chunkOpts.reply_to_message_id = replyToId
+              const chunk = chunks[i] as string
+              try {
+                const out = await telegramApi.sendMessage(args.chat_id, chunk, chunkOpts)
                 sentIds.push(out.message_id)
-              } else {
-                throw err
+              } catch (err) {
+                if (isTelegramHtmlParseError(err)) {
+                  // Telegram rejected our HTML. Retry the SAME chunk as plain
+                  // text so the user still sees the answer body — better a
+                  // missing <b> than a missing reply. Mirror gateway.py:500-510.
+                  log.warn('telegram HTML parse failed, retrying as plain text', {
+                    chunk_index: i,
+                    error: err instanceof Error ? err.message : String(err),
+                  })
+                  const plainOpts: SendMessageOpts = {}
+                  if (i === 0 && replyToId !== undefined) plainOpts.reply_to_message_id = replyToId
+                  const out = await telegramApi.sendMessage(args.chat_id, chunk, plainOpts)
+                  sentIds.push(out.message_id)
+                } else {
+                  throw err
+                }
               }
             }
+          } else {
+            // text / markdownv2 — also chunk at 4000 chars so a 9000-char reply
+            // does not trip Telegram's 4096 sendMessage cap. reply_to threads
+            // only the first chunk so a long answer doesn't quote-spam.
+            // chunk.ts' tag-balancing is HTML-specific; for text/markdownv2 we
+            // still rely on the same paragraph/line/hard-cut preference order
+            // (the tag-balance path is a no-op when no <pre>/<code> tags).
+            const chunks = splitMessage(args.text)
+            for (let i = 0; i < chunks.length; i++) {
+              const chunkOpts: SendMessageOpts = {}
+              if (i === 0 && replyToId !== undefined) chunkOpts.reply_to_message_id = replyToId
+              if (args.format === 'markdownv2') chunkOpts.parse_mode = 'MarkdownV2'
+              const chunk = chunks[i] as string
+              const sent = await telegramApi.sendMessage(args.chat_id, chunk, chunkOpts)
+              sentIds.push(sent.message_id)
+            }
           }
-        } else {
-          // text / markdownv2 — also chunk at 4000 chars so a 9000-char reply
-          // does not trip Telegram's 4096 sendMessage cap. reply_to threads
-          // only the first chunk so a long answer doesn't quote-spam.
-          // chunk.ts' tag-balancing is HTML-specific; for text/markdownv2 we
-          // still rely on the same paragraph/line/hard-cut preference order
-          // (the tag-balance path is a no-op when no <pre>/<code> tags).
-          const chunks = splitMessage(args.text)
-          for (let i = 0; i < chunks.length; i++) {
-            const chunkOpts: SendMessageOpts = {}
-            if (i === 0 && replyToId !== undefined) chunkOpts.reply_to_message_id = replyToId
-            if (args.format === 'markdownv2') chunkOpts.parse_mode = 'MarkdownV2'
-            const chunk = chunks[i] as string
-            const sent = await telegramApi.sendMessage(args.chat_id, chunk, chunkOpts)
-            sentIds.push(sent.message_id)
-          }
-        }
 
-        // Attachments. We send the canonical (realpath-resolved) path so a
-        // symlink or relative path inside the workspace becomes the absolute
-        // file ultimately handed to grammY's InputFile.
-        //
-        // 24.09.2026: sendVideo() (added in 60477d9, same day) does not pass
-        // width/height/duration, so Telegram guesses them itself — the exact
-        // failure mode already documented for the channel poster (see
-        // publish_queue.py's post_to_channel comment: "Telegram squashes the
-        // aspect ratio when it has to guess them"). Confirmed live: a 9:16
-        // reel sent through this path rendered letterboxed in Dima's chat.
-        // Routing video through sendDocument avoids the guess entirely —
-        // this also matches this tool's own advertised contract ("other
-        // types as documents"), which isVideoExtension silently violated.
-        for (const canonical of canonicalFiles) {
-          const opts: SendDocumentOpts = {}
-          if (args.reply_to !== undefined) opts.reply_to_message_id = Number(args.reply_to)
-          const out = isPhotoExtension(canonical)
-            ? await telegramApi.sendPhoto(args.chat_id, canonical, opts)
-            : await telegramApi.sendDocument(args.chat_id, canonical, opts)
-          sentIds.push(out.message_id)
+          // Attachments. We send the canonical (realpath-resolved) path so a
+          // symlink or relative path inside the workspace becomes the absolute
+          // file ultimately handed to grammY's InputFile.
+          //
+          // 24.09.2026: sendVideo() (added in 60477d9, same day) does not pass
+          // width/height/duration, so Telegram guesses them itself — the exact
+          // failure mode already documented for the channel poster (see
+          // publish_queue.py's post_to_channel comment: "Telegram squashes the
+          // aspect ratio when it has to guess them"). Confirmed live: a 9:16
+          // reel sent through this path rendered letterboxed in Dima's chat.
+          // Routing video through sendDocument avoids the guess entirely —
+          // this also matches this tool's own advertised contract ("other
+          // types as documents"), which isVideoExtension silently violated.
+          for (const canonical of canonicalFiles) {
+            const opts: SendDocumentOpts = {}
+            if (args.reply_to !== undefined) opts.reply_to_message_id = Number(args.reply_to)
+            const out = isPhotoExtension(canonical)
+              ? await telegramApi.sendPhoto(args.chat_id, canonical, opts)
+              : await telegramApi.sendDocument(args.chat_id, canonical, opts)
+            sentIds.push(out.message_id)
+          }
+        } catch (err) {
+          if (sentIds.length === 0) throw err
+          const msg = err instanceof Error ? err.message : String(err)
+          log.error('reply partially sent', { chat_id: args.chat_id, sent: sentIds.length, error: msg })
+          return toolError(
+            name,
+            `${msg}. ${sentIds.length} part(s) were already sent (ids: ${sentIds.join(', ')}); do not resend them, send only what is missing.`,
+          )
         }
 
         // Real answer shipped — clear the transient status. complete() is
