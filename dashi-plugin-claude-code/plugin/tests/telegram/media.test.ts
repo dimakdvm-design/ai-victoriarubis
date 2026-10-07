@@ -84,3 +84,43 @@ describe('downloadPhotoToInbox — shrinking', () => {
     expect(written).toEqual(raw)
   })
 })
+
+// A stalled CDN download or a wedged ffmpeg must not hang the handler: the
+// poller handles updates one at a time, so one stuck photo would stop every
+// later message from reaching the agent.
+describe('downloadPhotoToInbox — never hangs', () => {
+  // fetch that only settles when its AbortSignal fires — models a dead socket.
+  const hangingFetch = ((_url: string, init?: { signal?: AbortSignal }) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+    })) as unknown as typeof fetch
+
+  test('gives up on a stalled download after timeoutMs and returns undefined', async () => {
+    const started = Date.now()
+    const path = await downloadPhotoToInbox(makeBot('photos/big.jpg'), 'TOKEN', 'f1', '/inbox', {
+      fetchImpl: hangingFetch,
+      mkdir: async () => {},
+      writeFile: async () => {},
+      timeoutMs: 50,
+    })
+    expect(path).toBeUndefined()
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+
+  test('falls back to raw bytes when scaling hangs past scaleTimeoutMs', async () => {
+    const raw = new Uint8Array([3, 1, 4])
+    let written: Uint8Array | undefined
+    const path = await downloadPhotoToInbox(makeBot('photos/big.jpg'), 'TOKEN', 'f1', '/inbox', {
+      fetchImpl: (async () => new Response(raw)) as unknown as typeof fetch,
+      mkdir: async () => {},
+      writeFile: async (_p, data) => {
+        written = data
+      },
+      now: () => 1000,
+      scaleImage: () => new Promise<Uint8Array>(() => {}),
+      scaleTimeoutMs: 50,
+    })
+    expect(path).toBe('/inbox/1000-u1.jpg')
+    expect(written).toEqual(raw)
+  })
+})

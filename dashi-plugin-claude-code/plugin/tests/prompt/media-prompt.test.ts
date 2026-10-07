@@ -382,3 +382,43 @@ describe('maybeTranscribeVoice', () => {
     expect(r.status).toBe('skipped')
   })
 })
+
+// A stalled Groq call or Telegram download must not freeze the inbound
+// pipeline — the voice message still reaches the agent, marked failed.
+describe('maybeTranscribeVoice — never hangs', () => {
+  test('returns failed when the Groq request stalls past timeoutMs', async () => {
+    const r = await maybeTranscribeVoice(
+      {
+        fileId: 'v',
+        size: 1000,
+        downloadFile: async () => ({ path: '/tmp/voice.ogg', size: 1000 }),
+        readFile: async () => new Uint8Array([0]),
+        fetchImpl: ((_url: string, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+          })) as unknown as typeof fetch,
+        timeoutMs: 50,
+      },
+      voiceConfig,
+      { GROQ_API_KEY: 'gsk_test_key' },
+    )
+    expect(r.status).toBe('failed')
+  })
+
+  test('returns failed when the voice download stalls past timeoutMs', async () => {
+    const r = await maybeTranscribeVoice(
+      {
+        fileId: 'v',
+        size: 1000,
+        downloadFile: () => new Promise(() => {}),
+        readFile: async () => new Uint8Array([0]),
+        fetchImpl: (async () => new Response('x')) as unknown as typeof fetch,
+        timeoutMs: 50,
+      },
+      voiceConfig,
+      { GROQ_API_KEY: 'gsk_test_key' },
+    )
+    expect(r.status).toBe('failed')
+    expect(r.errorMessage).toContain('timed out')
+  })
+})
