@@ -706,3 +706,44 @@ describe('StatusManager.recordActivityByChatId', () => {
     expect(last.text).not.toContain('cmd-06')
   })
 })
+
+// sendMessage goes through the per-chat send queue and can take seconds.
+// Hook events (webhook) arrive concurrently and must not leave a second
+// "Печатает..." bubble orphaned in the chat.
+describe('StatusManager — concurrent start', () => {
+  // Fake api whose sendMessage resolves only when release() is called.
+  function makeSlowApi() {
+    const fake = makeFakeApi()
+    const pending: Array<() => void> = []
+    const inner = fake.api.sendMessage
+    fake.api.sendMessage = (chatId, text, opts) =>
+      new Promise((resolve) => {
+        pending.push(() => resolve(inner(chatId, text, opts)))
+      })
+    const release = async (): Promise<void> => {
+      // Let queued microtasks enqueue their sends, then release them all.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      while (pending.length > 0) {
+        pending.shift()!()
+        for (let i = 0; i < 5; i++) await Promise.resolve()
+      }
+    }
+    return { fake, release }
+  }
+
+  test('two concurrent activity events open exactly one visible status', async () => {
+    const { fake, release } = makeSlowApi()
+    const { mgr } = makeManager({ api: fake })
+    const a = mgr.recordActivityByChatId('164795011', { kind: 'session_start' })
+    const b = mgr.recordActivityByChatId('164795011', { kind: 'reasoning' })
+    await release()
+    await Promise.all([a, b])
+    await release()
+    const sent = fake.calls.filter((c) => c.kind === 'send').map((c) => c.messageId)
+    const deleted = fake.calls.filter((c) => c.kind === 'delete').map((c) => c.messageId)
+    const visible = sent.filter((id) => !deleted.includes(id))
+    expect(visible.length).toBe(1)
+    expect(mgr.isActive('164795011')).toBe(true)
+  })
+
+})
